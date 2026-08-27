@@ -1,98 +1,133 @@
 import json
 import os
 
-import openai
-import requests
 from django.core.cache import cache
-from django.http import JsonResponse, HttpResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+
+from .services import (
+    WeatherServiceError,
+    alerts,
+    analyze_weather,
+    fetch_forecast,
+    generate_chat_answer,
+    normalize_weather,
+    recommendations,
+    search_locations,
+)
+
+CACHE_SECONDS = 15 * 60
 
 
-def get_forecast(request, lat: str, lon: str) -> HttpResponse:
+def _error(message: str, status: int = 400) -> JsonResponse:
+    return JsonResponse({"error": message}, status=status)
+
+
+def _lat_lon(lat: str, lon: str) -> tuple[float, float] | None:
     try:
-        lat = float(lat)
-        lon = float(lon)
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-            return HttpResponse("Invalid latitude or longitude value.", status=400)
-    except ValueError:
-        return HttpResponse("Invalid latitude or longitude value.", status=400)
-
-    if not (-90 <= lat <= 90):
-        return HttpResponse("Latitude must be between -90 and 90", status=400)
-    if not (-180 <= lon <= 180):
-        return HttpResponse("Longitude must be between -180 and 180", status=400)
-
-    cache_key = f"forecast_{lat}_{lon}"
-    cached_data = cache.get(cache_key)
-
-    if cached_data is not None:
-        return JsonResponse(cached_data, status=200)
-
-    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m," \
-          f"relativehumidity_2m,apparent_temperature,precipitation_probability,precipitation,rain,showers," \
-          f"snowfall,snow_depth,windgusts_10m,uv_index,uv_index_clear_sky&daily=weathercode,temperature_2m_max," \
-          f"temperature_2m_min,apparent_temperature_max,apparent_temperature_min,sunrise,sunset,uv_index_max," \
-          f"uv_index_clear_sky_max&current_weather=true&timezone=Europe%2FLondon"
-
-    response = requests.get(url)
-
-    if response.status_code == 200:
-        forecast = response.json()
-        cache.set(cache_key, forecast, 60 * 60)
-        return JsonResponse(forecast, status=200)
-
-    return HttpResponse("Error retrieving forecast", status=500)
+        latitude, longitude = float(lat), float(lon)
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            return None
+        return latitude, longitude
+    except (TypeError, ValueError):
+        return None
 
 
-def get_forecast_summary(request, lat: str, lon: str) -> HttpResponse:
+def _load_overview(lat: str, lon: str, location: dict | None = None) -> dict:
+    coordinates = _lat_lon(lat, lon)
+    if coordinates is None:
+        raise WeatherServiceError("Invalid latitude or longitude value.")
+    latitude, longitude = coordinates
+    key = f"overview_{latitude:.4f}_{longitude:.4f}"
+    cached = cache.get(key)
+    if cached:
+        return cached
+    forecast = fetch_forecast(latitude, longitude)
+    weather = normalize_weather(forecast, location or {"latitude": latitude, "longitude": longitude})
+    analysis = analyze_weather(weather)
+    result = {
+        "weather": weather,
+        "analysis": analysis,
+        "recommendations": recommendations(weather, analysis),
+        "alerts": alerts(weather, analysis),
+    }
+    cache.set(key, result, CACHE_SECONDS)
+    return result
+
+
+@require_http_methods(["GET"])
+def get_forecast(request: HttpRequest, lat: str, lon: str) -> HttpResponse:
     try:
-        lat = float(lat)
-        lon = float(lon)
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-            return HttpResponse("Invalid latitude or longitude value.", status=400)
-    except ValueError:
-        return HttpResponse("Invalid latitude or longitude value.", status=400)
+        return JsonResponse(fetch_forecast(lat, lon))
+    except WeatherServiceError as exc:
+        return _error(str(exc), 502)
 
-    if not (-90 <= lat <= 90):
-        return HttpResponse("Latitude must be between -90 and 90", status=400)
-    if not (-180 <= lon <= 180):
-        return HttpResponse("Longitude must be between -180 and 180", status=400)
 
-    cache_key = f"forecast_summary_{lat}_{lon}"
-    cached_data = cache.get(cache_key)
-
-    if cached_data is not None:
-        return JsonResponse(cached_data, status=200)
-
-    response = get_forecast(request, str(lat), str(lon))
-
-    if response.status_code != 200:
-        return response
-
-    forecast = json.loads(response.content)
-
+@require_http_methods(["GET"])
+def get_forecast_summary(request: HttpRequest, lat: str, lon: str) -> HttpResponse:
     try:
-        openai.api_key = os.getenv('OPENAI_API_KEY')
+        overview = _load_overview(lat, lon)
+        current = overview["weather"]["current"]
+        analysis = overview["analysis"]
+        return JsonResponse({"summary": f"{analysis['condition']} with {round(current['temperature'])}°C currently. Rain probability reaches {analysis['rain_probability']}% in the available forecast."})
+    except WeatherServiceError as exc:
+        return _error(str(exc), 502)
 
-        compilation = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            temperature=0.8,
-            n=1,
-            stream=False,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Given the weather forecast, write a summary of the weather in a human readable format with energy and enthusiasm, as if you were a weather reporter."
-                },
-                {
-                    "role": "user",
-                    "content": str(forecast['current_weather'])
-                }
-            ]
-        )
-        data = dict()
-        data['summary'] = compilation['choices'][0]['message']['content']
-        cache.set(cache_key, data, 60 * 60)
-        return JsonResponse(data, status=200)
-    except openai.error.InvalidRequestError as e:
-        print(e)
-        return HttpResponse("Error retrieving forecast summary", status=500)
+
+@require_http_methods(["GET"])
+def get_overview(request: HttpRequest, lat: str, lon: str) -> JsonResponse:
+    try:
+        location = {"latitude": float(lat), "longitude": float(lon), "name": request.GET.get("name") or "Selected location"}
+        return JsonResponse(_load_overview(lat, lon, location))
+    except (WeatherServiceError, ValueError) as exc:
+        return _error(str(exc), 502)
+
+
+@require_http_methods(["GET"])
+def location_search(request: HttpRequest) -> JsonResponse:
+    try:
+        return JsonResponse({"results": search_locations(request.GET.get("q", ""))})
+    except WeatherServiceError as exc:
+        return _error(str(exc), 502)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def chat(request: HttpRequest) -> JsonResponse:
+    try:
+        payload = json.loads(request.body or "{}")
+        question = str(payload.get("question", "")).strip()
+        language = payload.get("language", "en") if payload.get("language") in {"en", "hi", "mr"} else "en"
+        if not question or len(question) > 500:
+            return _error("Ask a weather question between 1 and 500 characters.")
+        overview = _load_overview(str(payload.get("latitude")), str(payload.get("longitude")), payload.get("location"))
+        answer = generate_chat_answer(question, overview["weather"], overview["analysis"], language)
+        return JsonResponse({"answer": answer, "grounded": True, "source": "Open-Meteo", "analysis": overview["analysis"]})
+    except (json.JSONDecodeError, TypeError):
+        return _error("Request body must be valid JSON.")
+    except WeatherServiceError as exc:
+        return _error(str(exc), 502)
+
+
+@require_http_methods(["GET"])
+def preferences(request: HttpRequest) -> JsonResponse:
+    return JsonResponse(request.session.get("weather_preferences", {
+        "language": "en", "temperature_unit": "celsius", "notifications": False,
+        "severe_alerts": True, "clothing_recommendations": True,
+    }))
+
+
+@csrf_exempt
+@require_http_methods(["PUT"])
+def update_preferences(request: HttpRequest) -> JsonResponse:
+    try:
+        payload = json.loads(request.body or "{}")
+        current = request.session.get("weather_preferences", {})
+        allowed = {"language", "temperature_unit", "notifications", "severe_alerts", "clothing_recommendations", "location"}
+        current.update({key: value for key, value in payload.items() if key in allowed})
+        request.session["weather_preferences"] = current
+        request.session.save()
+        return JsonResponse(current)
+    except json.JSONDecodeError:
+        return _error("Request body must be valid JSON.")
