@@ -6,7 +6,9 @@ export const routes: Routes = [
   {
     path: '',
     loadComponent: () =>
-      import('@features/home/home.component').then(mod => mod.HomeComponent),
+      import('@features/dashboard/dashboard.component').then(
+        mod => mod.DashboardComponent
+      ),
   },
   {
     path: 'forecast',
