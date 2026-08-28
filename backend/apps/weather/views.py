@@ -2,6 +2,7 @@ import json
 import os
 
 from django.core.cache import cache
+from django.db.utils import OperationalError
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -112,10 +113,14 @@ def chat(request: HttpRequest) -> JsonResponse:
 
 @require_http_methods(["GET"])
 def preferences(request: HttpRequest) -> JsonResponse:
-    return JsonResponse(request.session.get("weather_preferences", {
+    defaults = {
         "language": "en", "temperature_unit": "celsius", "notifications": False,
         "severe_alerts": True, "clothing_recommendations": True,
-    }))
+    }
+    try:
+        return JsonResponse({**defaults, **request.session.get("weather_preferences", {})})
+    except OperationalError:
+        return JsonResponse(defaults)
 
 
 @csrf_exempt
@@ -127,7 +132,10 @@ def update_preferences(request: HttpRequest) -> JsonResponse:
         allowed = {"language", "temperature_unit", "notifications", "severe_alerts", "clothing_recommendations", "location"}
         current.update({key: value for key, value in payload.items() if key in allowed})
         request.session["weather_preferences"] = current
-        request.session.save()
+        try:
+            request.session.save()
+        except OperationalError:
+            pass
         return JsonResponse(current)
     except json.JSONDecodeError:
         return _error("Request body must be valid JSON.")
