@@ -128,7 +128,10 @@ def preferences(request: HttpRequest) -> JsonResponse:
 def update_preferences(request: HttpRequest) -> JsonResponse:
     try:
         payload = json.loads(request.body or "{}")
-        current = request.session.get("weather_preferences", {})
+        try:
+            current = request.session.get("weather_preferences", {})
+        except OperationalError:
+            current = {}
         allowed = {"language", "temperature_unit", "notifications", "severe_alerts", "clothing_recommendations", "location"}
         current.update({key: value for key, value in payload.items() if key in allowed})
         request.session["weather_preferences"] = current
