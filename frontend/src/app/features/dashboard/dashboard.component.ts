@@ -227,7 +227,7 @@ export class DashboardComponent implements OnInit {
     recognition.start();
   }
 
-  savePreference(key: string, value: string): void {
+  savePreference(key: string, value: string | boolean): void {
     const patch: any = {};
     patch[key] = value;
     this.weatherService.savePreferences(patch).subscribe({ error: () => undefined });
@@ -235,10 +235,10 @@ export class DashboardComponent implements OnInit {
 
   setNotifications(enabled: boolean): void {
     if (enabled && typeof Notification !== 'undefined' && Notification.permission !== 'granted') {
-      Notification.requestPermission().then(permission => { this.notifications = permission === 'granted'; this.savePreference('notifications', this.notifications ? 'true' : 'false'); });
+      Notification.requestPermission().then(permission => { this.notifications = permission === 'granted'; this.savePreference('notifications', this.notifications); });
       return;
     }
-    this.savePreference('notifications', enabled ? 'true' : 'false');
+    this.savePreference('notifications', enabled);
   }
 
   applyPreferences(preferences: WeatherPreferences): void {
