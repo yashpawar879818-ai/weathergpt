@@ -112,7 +112,7 @@ See [`backend/.env.example`](./backend/.env.example):
 
 ## Validation
 
-The repository includes backend service tests and a GitHub Actions workflow at [`.github/workflows/ci.yml`](./.github/workflows/ci.yml). The workflow runs:
+The repository includes backend service tests. The recommended validation sequence runs:
 
 - Python compilation, Django system checks, and Django tests.
 - A frozen pnpm install and Angular production build.
